@@ -1,30 +1,31 @@
 import { useEffect, useState } from 'react';
 import { io } from 'socket.io-client';
 import { v4 as uuidv4 } from 'uuid';
+import { supabase } from './supabaseClient'; // NEW: Import Supabase!
 
-const socket = io('https://trivia-api-z36k.onrender.com');
+const socket = io('https://trivia-api-z36k.onrender.com'); // Your live server!
 const NEWPORT_BAR_ID = '11111111-1111-1111-1111-111111111111';
 
 function App() {
   const [deviceId, setDeviceId] = useState('');
   const [nickname, setNickname] = useState('');
-  
-  // NEW: Added the 'result' screen type
   const [screen, setScreen] = useState<'login' | 'waiting' | 'playing' | 'locked_in' | 'result' | 'final_results'>('login');
   
+  // NEW: Auth States
+  const [authMode, setAuthMode] = useState<'guest' | 'signup' | 'login'>('guest');
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [currentUser, setCurrentUser] = useState<any>(null);
+
   const [currentQuestion, setCurrentQuestion] = useState<any>(null);
   const [selectedAnswer, setSelectedAnswer] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null); 
-
   const [questionStartTime, setQuestionStartTime] = useState<number>(0);
   const [timeTaken, setTimeTaken] = useState<string>('');
   const [potentialPoints, setPotentialPoints] = useState<number>(0);
-  
   const [finalLeaderboard, setFinalLeaderboard] = useState<any[]>([]);
   const [actualCorrectAnswer, setActualCorrectAnswer] = useState<string | null>(null);
-  
-  // NEW: Store the prize!
-  const [reward, setReward] = useState<string>('');
+  const [reward, setReward] = useState<string>(''); 
 
   useEffect(() => {
     let savedDeviceId = localStorage.getItem('trivia_device_id');
@@ -34,27 +35,35 @@ function App() {
     }
     setDeviceId(savedDeviceId);
 
+    // NEW: Check if they are already logged in from last week!
+    supabase.auth.getSession().then(({ data: { session } }) => {
+      if (session) {
+        setCurrentUser(session.user);
+        setNickname(session.user.user_metadata?.nickname || 'RegularPlayer');
+        setAuthMode('guest'); // Bypass the auth form if already logged in
+      }
+    });
+
     socket.on('NEW_QUESTION', (data) => {
       setCurrentQuestion(data);
       setSelectedAnswer(null); 
-      setActualCorrectAnswer(null); // Clear the previous answer
+      setActualCorrectAnswer(null); 
       setQuestionStartTime(Date.now()); 
       setScreen('playing');
     });
 
-    // THE UPGRADE: The phone catches the correct answer and instantly grades the player
     socket.on('SHOW_LEADERBOARD', (data) => {
       setActualCorrectAnswer(data.correctAnswer);
-      setScreen('result'); // Send them to the grading screen!
+      setScreen('result'); 
     });
 
-   // UPGRADED: Catch the leaderboard AND the prize
     socket.on('GAME_OVER', (data) => {
       setFinalLeaderboard(data.leaderboard || []);
       setReward(data.prize || '');
       setScreen('final_results');
       setSelectedAnswer(null); 
     });
+
     return () => {
       socket.off('NEW_QUESTION');
       socket.off('SHOW_LEADERBOARD');
@@ -62,13 +71,46 @@ function App() {
     };
   }, []);
 
-  const handleJoin = (e: React.FormEvent) => {
+  // NEW: Handle Account Creation & Login
+  const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!nickname.trim()) return;
+    setErrorMsg(null);
+
+    if (authMode === 'guest') {
+      if (!nickname.trim()) return;
+      joinGameLobby();
+      return;
+    }
+
+    if (!email || !password || (authMode === 'signup' && !nickname)) {
+      setErrorMsg('Please fill in all fields.');
+      return;
+    }
+
+    if (authMode === 'signup') {
+      const { data, error } = await supabase.auth.signUp({
+        email,
+        password,
+        options: { data: { nickname: nickname } }
+      });
+      if (error) return setErrorMsg(error.message);
+      setCurrentUser(data.user);
+      joinGameLobby();
+    } 
+    
+    if (authMode === 'login') {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) return setErrorMsg(error.message);
+      setCurrentUser(data.user);
+      setNickname(data.user?.user_metadata?.nickname || 'Player');
+      joinGameLobby();
+    }
+  };
+
+  const joinGameLobby = () => {
     socket.emit('join_bar', { barId: NEWPORT_BAR_ID, deviceId, nickname });
-    socket.once('JOIN_ERROR', (serverErrorMsg) => {
-      setErrorMsg(serverErrorMsg);
-      setNickname('');
+    socket.once('JOIN_ERROR', (msg) => {
+      setErrorMsg(msg);
       setTimeout(() => setErrorMsg(null), 3000);
     });
     socket.once('JOIN_SUCCESS', () => {
@@ -91,27 +133,75 @@ function App() {
     setSelectedAnswer(answer);
     setScreen('locked_in');
 
-    socket.emit('SUBMIT_ANSWER', { barId: NEWPORT_BAR_ID, deviceId, nickname, answer });
+    // UPGRADED: We now send the currentUser.id if they have an account!
+    socket.emit('SUBMIT_ANSWER', { 
+      barId: NEWPORT_BAR_ID, 
+      deviceId: deviceId, 
+      nickname: nickname, 
+      answer: answer,
+      userId: currentUser?.id // <--- THIS IS THE MAGIC KEY
+    });
   };
 
   return (
     <div className="min-h-screen bg-gray-900 text-white flex flex-col items-center justify-center font-sans relative overflow-hidden">
-      
-      {/* Container wrapper for max-width on mobile */}
       <div className="w-full max-w-md mx-auto h-full flex flex-col justify-center p-6 relative z-10">
         
         {screen === 'login' && (
-          <form onSubmit={handleJoin} className="flex flex-col gap-6 w-full animate-fade-in">
-            <h1 className="text-4xl font-black text-center text-blue-500 mb-4">JOIN TRIVIA</h1>
-            {errorMsg && <div className="bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-xl text-center font-bold">{errorMsg}</div>}
-            <div>
-              <label className="block text-gray-400 text-sm font-bold mb-2 uppercase">Nickname</label>
-              <input type="text" value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={12} className="w-full bg-gray-800 text-white text-2xl font-bold rounded-xl p-4 border-2 border-gray-700 focus:border-blue-500 focus:outline-none text-center" placeholder="e.g. LakersFan99"/>
-            </div>
-            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black text-2xl py-5 rounded-xl transition active:scale-95">PLAY NOW</button>
+          <form onSubmit={handleAuth} className="flex flex-col gap-5 w-full animate-fade-in bg-gray-800 p-8 rounded-3xl shadow-2xl border border-gray-700">
+            <h1 className="text-4xl font-black text-center text-blue-500 mb-2">JOIN TRIVIA</h1>
+            
+            {/* The Auth Tabs */}
+            {!currentUser && (
+              <div className="flex bg-gray-900 rounded-xl p-1 mb-4">
+                <button type="button" onClick={() => setAuthMode('guest')} className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${authMode === 'guest' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Guest</button>
+                <button type="button" onClick={() => setAuthMode('login')} className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${authMode === 'login' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Log In</button>
+                <button type="button" onClick={() => setAuthMode('signup')} className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${authMode === 'signup' ? 'bg-blue-600 text-white' : 'text-gray-400 hover:text-white'}`}>Sign Up</button>
+              </div>
+            )}
+
+            {errorMsg && <div className="bg-red-500/10 border border-red-500 text-red-500 px-4 py-3 rounded-xl text-center font-bold text-sm">{errorMsg}</div>}
+
+            {currentUser ? (
+              <div className="text-center py-4">
+                <div className="w-16 h-16 bg-blue-600 rounded-full flex items-center justify-center mx-auto mb-4 text-2xl">👤</div>
+                <p className="text-gray-400 font-bold mb-1">Welcome back,</p>
+                <p className="text-3xl font-black text-white">{nickname}</p>
+              </div>
+            ) : (
+              <>
+                {(authMode === 'guest' || authMode === 'signup') && (
+                  <div>
+                    <label className="block text-gray-400 text-xs font-bold mb-2 uppercase">Nickname</label>
+                    <input type="text" value={nickname} onChange={(e) => setNickname(e.target.value)} maxLength={12} className="w-full bg-gray-900 text-white text-xl font-bold rounded-xl p-4 border-2 border-gray-700 focus:border-blue-500 focus:outline-none" placeholder="e.g. LakersFan99"/>
+                  </div>
+                )}
+                {(authMode === 'login' || authMode === 'signup') && (
+                  <>
+                    <div>
+                      <label className="block text-gray-400 text-xs font-bold mb-2 uppercase">Email</label>
+                      <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} className="w-full bg-gray-900 text-white text-xl rounded-xl p-4 border-2 border-gray-700 focus:border-blue-500 focus:outline-none" placeholder="you@email.com"/>
+                    </div>
+                    <div>
+                      <label className="block text-gray-400 text-xs font-bold mb-2 uppercase">Password</label>
+                      <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} className="w-full bg-gray-900 text-white text-xl rounded-xl p-4 border-2 border-gray-700 focus:border-blue-500 focus:outline-none" placeholder="••••••••"/>
+                    </div>
+                  </>
+                )}
+              </>
+            )}
+
+            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-500 text-white font-black text-2xl py-5 rounded-xl transition active:scale-95 mt-2 shadow-lg shadow-blue-900/50">
+              {authMode === 'login' ? 'LOG IN & PLAY' : currentUser ? 'ENTER LOBBY' : 'PLAY NOW'}
+            </button>
+
+            {authMode !== 'guest' && !currentUser && (
+               <p className="text-center text-xs text-gray-500 mt-2">Accounts permanently save your lifetime points.</p>
+            )}
           </form>
         )}
 
+        {/* --- THE REST OF YOUR SCREENS (Waiting, Playing, Locked In, Results) REMAIN EXACTLY THE SAME BELOW THIS LINE --- */}
         {screen === 'waiting' && (
           <div className="text-center animate-fade-in">
             <div className="w-16 h-16 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-8"></div>
@@ -155,7 +245,6 @@ function App() {
           </div>
         )}
 
-        {/* NEW: THE GRADING RESULT SCREEN */}
         {screen === 'result' && (
           <div className="flex flex-col items-center justify-center animate-fade-in text-center h-full w-full">
             {selectedAnswer === actualCorrectAnswer ? (
@@ -185,7 +274,6 @@ function App() {
                 </div>
               </>
             )}
-
             <div className="mt-4 px-6 py-3 bg-gray-800/80 rounded-full border border-gray-600 shadow-lg">
               <p className="text-lg text-blue-300 font-bold">Eyes on the TV for the Top 5...</p>
             </div>
@@ -195,8 +283,6 @@ function App() {
         {screen === 'final_results' && (
           <div className="flex flex-col items-center justify-center animate-fade-in text-center h-full w-full">
             <h2 className="text-5xl font-black mb-6 text-yellow-400 tracking-tight">FINAL SCORES</h2>
-            
-            {/* THE GOLDEN TICKET: Only shows to the #1 player! */}
             {finalLeaderboard.length > 0 && finalLeaderboard[0].name === nickname && (
               <div className="bg-gradient-to-r from-yellow-500 to-yellow-600 p-1 rounded-2xl w-full max-w-sm mb-6 shadow-2xl animate-bounce">
                 <div className="bg-gray-900 p-4 rounded-xl border border-yellow-500/50">
@@ -206,7 +292,6 @@ function App() {
                 </div>
               </div>
             )}
-
             <div className="bg-gray-800 border border-gray-700 p-6 rounded-3xl w-full max-w-sm flex flex-col gap-4 shadow-2xl mb-8">
               {finalLeaderboard.length === 0 ? (
                 <p className="text-gray-400 text-xl font-bold py-4">Nobody scored points!</p>
@@ -227,8 +312,6 @@ function App() {
         )}
 
       </div>
-
-      {/* Dynamic Background Colors for the Result Screen */}
       {screen === 'result' && selectedAnswer === actualCorrectAnswer && <div className="absolute inset-0 bg-green-900/40 z-0 transition-opacity duration-500"></div>}
       {screen === 'result' && selectedAnswer !== actualCorrectAnswer && selectedAnswer !== null && <div className="absolute inset-0 bg-red-900/40 z-0 transition-opacity duration-500"></div>}
     </div>
